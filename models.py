@@ -27,12 +27,14 @@ class Microservice(Base):
     ms_id = Column(String) # The id returned from MCP (e.g. frontend-web)
     name = Column(String)
     description = Column(String)
+    ai_prompt_context = Column(String)
     avatar_visual_prompt = Column(String)
     avatar_image_url = Column(String)
     position_x = Column(Float, default=0.0)
     position_y = Column(Float, default=0.0)
 
     project = relationship("Project", back_populates="microservices")
+    chat_histories = relationship("ChatHistory", back_populates="microservice", cascade="all, delete-orphan")
 
 class Dependency(Base):
     __tablename__ = "dependencies"
@@ -45,3 +47,13 @@ class Dependency(Base):
     relationship_type = Column(String)
 
     project = relationship("Project", back_populates="dependencies")
+
+class ChatHistory(Base):
+    __tablename__ = "chat_histories"
+    
+    id = Column(String, primary_key=True, default=generate_uuid)
+    microservice_id = Column(String, ForeignKey("microservices.id"))
+    messages = Column(String, default="[]") # JSON stringified list of messages
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    microservice = relationship("Microservice", back_populates="chat_histories")

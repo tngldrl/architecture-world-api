@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import httpx
 import os
+import json
 
 from database import engine, Base, get_db
 import models
@@ -51,6 +52,14 @@ async def run_analysis_task(project_id: str, repo_paths: list[str]):
                     ms_id=ms.get("id"),
                     name=ms.get("name"),
                     description=ms.get("description"),
+                    ai_prompt_context=(
+                        f"You are the {ms.get('role_type', 'staff')} in a restaurant. "
+                        f"Your component is '{ms.get('name', 'Unknown')}'. "
+                        f"Your description is: {ms.get('description', 'No description')} "
+                        f"Scale/Complexity: {ms.get('scale_and_complexity', 'Unknown')} "
+                        f"Importance: {ms.get('importance_and_centrality', 'Unknown')} "
+                        "Respond to the user as this persona, providing helpful architectural information."
+                    ),
                     avatar_visual_prompt=ms.get("avatar_prompt"),
                     avatar_image_url=ms.get("avatar_image_url"),
                     position_x=ms.get("position", {}).get("x", 0.0),
@@ -150,6 +159,57 @@ def get_project(project_id: str, db: Session = Depends(get_db)):
         "microservices": microservices,
         "dependencies": dependencies
     }
+
+class ChatMessage(BaseModel):
+    message: str
+
+@app.get("/api/microservices/{ms_id}/chat")
+def get_chat_history(ms_id: str, db: Session = Depends(get_db)):
+    ms = db.query(models.Microservice).filter(models.Microservice.id == ms_id).first()
+    if not ms:
+        raise HTTPException(status_code=404, detail="Microservice not found")
+        
+    chat = db.query(models.ChatHistory).filter(models.ChatHistory.microservice_id == ms.id).first()
+    messages = json.loads(chat.messages) if chat else []
+    return {"messages": messages}
+
+@app.post("/api/microservices/{ms_id}/chat")
+async def send_chat_message(ms_id: str, req: ChatMessage, db: Session = Depends(get_db)):
+    ms = db.query(models.Microservice).filter(models.Microservice.id == ms_id).first()
+    if not ms:
+        raise HTTPException(status_code=404, detail="Microservice not found")
+        
+    chat = db.query(models.ChatHistory).filter(models.ChatHistory.microservice_id == ms.id).first()
+    if not chat:
+        chat = models.ChatHistory(microservice_id=ms.id, messages="[]")
+        db.add(chat)
+        db.commit()
+        db.refresh(chat)
+        
+    history = json.loads(chat.messages)
+    
+    # Call MCP
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(f"{MCP_URL}/chat", json={
+                "system_prompt": ms.ai_prompt_context or "You are a helpful assistant.",
+                "history": history,
+                "new_message": req.message
+            })
+            response.raise_for_status()
+            data = response.json()
+            reply = data.get("response", "I'm sorry, I couldn't process that.")
+    except Exception as e:
+        reply = f"Error calling MCP: {str(e)}"
+        
+    # Append to history
+    history.append({"role": "user", "content": req.message})
+    history.append({"role": "model", "content": reply})
+    
+    chat.messages = json.dumps(history)
+    db.commit()
+    
+    return {"reply": reply, "messages": history}
 
 if __name__ == "__main__":
     import uvicorn
