@@ -25,8 +25,17 @@ def verify_token(authorization: str = Header(None), db: Session = Depends(get_db
     token = authorization.split("Bearer ")[1]
     
     if token == "guest":
-        # Guest mode
-        return {"uid": "guest", "is_anonymous": True}
+        # Guest mode - ensure guest user exists in DB to prevent foreign key violation
+        uid = "guest"
+        email = "guest@example.com"
+        display_name = "Guest User"
+        user = db.query(models.User).filter(models.User.id == uid).first()
+        if not user:
+            user = models.User(id=uid, email=email, display_name=display_name)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        return {"uid": "guest", "email": "guest@example.com", "is_anonymous": True}
         
     # Try to decode JWT payload offline
     payload = decode_token_payload(token)
