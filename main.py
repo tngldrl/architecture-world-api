@@ -16,9 +16,17 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Architecture World API")
 
+allowed_origins = [
+    "http://localhost:3000",
+    "https://architecture-world-web-ulti3dddka-an.a.run.app",
+]
+allowed_origins_env = os.environ.get("ALLOWED_ORIGINS")
+if allowed_origins_env:
+    allowed_origins.extend([origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
