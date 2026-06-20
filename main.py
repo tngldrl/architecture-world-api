@@ -29,6 +29,7 @@ GITHUB_APP_WEBHOOK_SECRET = os.environ.get("GITHUB_APP_WEBHOOK_SECRET", "")
 GITHUB_APP_INSTALL_URL = os.environ.get("GITHUB_APP_INSTALL_URL", "")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 VERTEX_AI_LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Max hops for agentic code retrieval during chat
 MAX_RETRIEVAL_HOPS = 3
@@ -608,7 +609,7 @@ If no more files are needed: {{"additional_files": []}}
         import vertexai
         from vertexai.generative_models import GenerativeModel
         vertexai.init(project=GCP_PROJECT_ID, location=VERTEX_AI_LOCATION)
-        model = GenerativeModel("gemini-2.5-flash")
+        model = GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(
             prompt,
             generation_config={
