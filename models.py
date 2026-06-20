@@ -15,6 +15,7 @@ class Project(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=True)
     name = Column(String, nullable=True)
     status = Column(String, default="analyzing") # analyzing, ready, error
+    github_installation_id = Column(String, nullable=True)  # GitHub App installation ID (non-sensitive)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="projects")
@@ -48,6 +49,9 @@ class Microservice(Base):
     position_x = Column(Float, default=0.0)
     position_y = Column(Float, default=0.0)
     scale_tier = Column(Integer, default=3, nullable=False)
+    # JSON string: [{"path": str, "perspective": str, "reason": str}]
+    # Populated during analysis (Phase 2), used for chat-time code retrieval
+    key_files = Column(String, nullable=True)
 
     project = relationship("Project", back_populates="microservices")
     repository = relationship("Repository", back_populates="microservices")

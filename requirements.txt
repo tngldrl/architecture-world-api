@@ -6,3 +6,6 @@ sqlalchemy>=2.0.30
 firebase-admin
 psycopg2-binary>=2.9.9
 alembic>=1.13.1
+PyJWT[crypto]>=2.8.0
+cryptography>=42.0.0
+python-dotenv
