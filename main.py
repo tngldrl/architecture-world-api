@@ -57,6 +57,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def find_repository_by_url(db: Session, url: str, project_id: Optional[str] = None) -> Optional[models.Repository]:
+    """
+    Finds a Repository in the database matching a given URL by comparing their normalized
+    (owner, repo) pairs, ignoring casing and the '.git' suffix.
+    """
+    try:
+        target_owner, target_repo = parse_github_repo_url(url)
+    except ValueError:
+        return None
+
+    query = db.query(models.Repository)
+    if project_id:
+        query = query.filter(models.Repository.project_id == project_id)
+
+    all_repos = query.all()
+    for repo in all_repos:
+        try:
+            owner, name = parse_github_repo_url(repo.url)
+            if owner.lower() == target_owner.lower() and name.lower() == target_repo.lower():
+                return repo
+        except ValueError:
+            continue
+    return None
+
 MCP_URL = os.environ.get("MCP_URL", "http://localhost:8001")
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
@@ -144,10 +168,7 @@ async def analysis_callback(project_id: str, payload: CallbackPayload, db: Sessi
             repo_url = ms.get("repository_url")
             db_repo = None
             if repo_url:
-                db_repo = db.query(models.Repository).filter(
-                    models.Repository.project_id == project.id,
-                    models.Repository.url == repo_url
-                ).first()
+                db_repo = find_repository_by_url(db, repo_url, project_id=project.id)
             
             if not db_repo:
                 # Fallback: project's first repository
@@ -806,7 +827,7 @@ async def github_webhook(
     if not repo_url:
         return {"status": "ignored", "reason": "no repository url"}
 
-    db_repo = db.query(models.Repository).filter(models.Repository.url == repo_url).first()
+    db_repo = find_repository_by_url(db, repo_url)
     if not db_repo:
         return {"status": "ignored", "reason": "project not found"}
 
@@ -884,9 +905,7 @@ async def github_app_webhook(
         if not repo_url:
             return {"status": "ignored", "reason": "no repository url"}
 
-        db_repo = db.query(models.Repository).filter(
-            models.Repository.url == repo_url
-        ).first()
+        db_repo = find_repository_by_url(db, repo_url)
         if not db_repo:
             return {"status": "ignored", "reason": "repository not tracked"}
 
