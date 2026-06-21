@@ -398,19 +398,44 @@ async def check_github_app_access(
         return {"has_access": False}
 
     # Query GitHub API using each installation ID to see if any token has access to the repo
+    target_full_name = f"{owner}/{repo}".lower()
     for inst_id in installation_ids:
         try:
             iat = get_installation_access_token(inst_id)
-            url = f"https://api.github.com/repos/{owner}/{repo}"
             headers = {
                 "Authorization": f"Bearer {iat}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
+            api_url = "https://api.github.com/installation/repositories"
+            params = {"per_page": 100}
+            
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code == 200:
-                    return {"has_access": True}
+                while api_url:
+                    resp = await client.get(
+                        api_url, 
+                        headers=headers, 
+                        params=params if "installation/repositories" in api_url else None
+                    )
+                    if resp.status_code != 200:
+                        break
+                    
+                    data = resp.json()
+                    repos = data.get("repositories", [])
+                    for r_item in repos:
+                        r_full_name = r_item.get("full_name", "").lower()
+                        if r_full_name == target_full_name:
+                            return {"has_access": True}
+                    
+                    # Pagination support
+                    next_url = None
+                    if "Link" in resp.headers:
+                        links = resp.headers["Link"].split(",")
+                        for link in links:
+                            if 'rel="next"' in link:
+                                next_url = link.split(";")[0].strip("<> ")
+                                break
+                    api_url = next_url
         except Exception as e:
             logger.warning("Failed checking access for installation %s on %s/%s: %s", inst_id, owner, repo, e)
             continue
