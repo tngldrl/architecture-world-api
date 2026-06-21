@@ -848,6 +848,11 @@ async def github_webhook(
 
     return {"status": "re-analyzing", "project_id": target_project.id}
 
+@app.get("/api/debug-repositories")
+def debug_repositories(db: Session = Depends(get_db)):
+    repos = db.query(models.Repository).all()
+    return [{"id": r.id, "url": r.url, "webhook_enabled": r.webhook_enabled, "watch_branch": r.watch_branch, "project_id": r.project_id} for r in repos]
+
 
 @app.post("/api/webhooks/github-app")
 async def github_app_webhook(
