@@ -880,6 +880,8 @@ async def github_app_webhook(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
+    logger.info("GitHub App webhook received: event=%s", event_type)
+
     # --- Installation event: store installation_id ---
     if event_type == "installation":
         action = payload.get("action", "")
@@ -902,15 +904,23 @@ async def github_app_webhook(
         pushed_branch = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
         commit_sha = payload.get("after", None)  # HEAD commit SHA after push
 
+        logger.info(
+            "Push event received: repo_url=%s, ref=%s, commit_sha=%s, installation_id=%s",
+            repo_url, ref, commit_sha, installation_id
+        )
+
         if not repo_url:
+            logger.warning("Push event ignored: repo_url is empty")
             return {"status": "ignored", "reason": "no repository url"}
 
         db_repo = find_repository_by_url(db, repo_url)
         if not db_repo:
+            logger.warning("Push event ignored: no tracked repository found in DB for URL '%s'", repo_url)
             return {"status": "ignored", "reason": "repository not tracked"}
 
         target_project = db_repo.project
         if not target_project:
+            logger.warning("Push event ignored: project not found for repository ID %s", db_repo.id)
             return {"status": "ignored", "reason": "project not found"}
 
         # Update installation_id if we now have it from the push event
