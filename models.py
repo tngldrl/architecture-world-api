@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Integer
+from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Integer, Boolean
 from sqlalchemy.orm import relationship
 import uuid
 from datetime import datetime
@@ -16,6 +16,7 @@ class Project(Base):
     name = Column(String, nullable=True)
     status = Column(String, default="analyzing") # analyzing, ready, error
     github_installation_id = Column(String, nullable=True)  # GitHub App installation ID (non-sensitive)
+    has_update = Column(Boolean, default=False, nullable=False)  # True when a tracked repo received a push
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="projects")
@@ -29,10 +30,13 @@ class Repository(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     project_id = Column(String, ForeignKey("projects.id"))
     url = Column(String)
+    webhook_enabled = Column(Boolean, default=False, nullable=False)  # Enable push notification for this repo
+    watch_branch = Column(String, nullable=True)  # Branch to monitor (e.g. "main")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("Project", back_populates="repositories")
     microservices = relationship("Microservice", back_populates="repository")
+    webhook_deliveries = relationship("WebhookDelivery", back_populates="repository", cascade="all, delete-orphan")
 
 class Microservice(Base):
     __tablename__ = "microservices"
@@ -88,3 +92,18 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
+
+
+class WebhookDelivery(Base):
+    """Records each GitHub push event received for a tracked repository."""
+    __tablename__ = "webhook_deliveries"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    repository_id = Column(String, ForeignKey("repositories.id"), nullable=False)
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False)
+    branch = Column(String, nullable=False)  # Branch name without refs/heads/ prefix
+    commit_sha = Column(String, nullable=True)  # HEAD commit SHA of the push
+    received_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    matched = Column(Boolean, default=False, nullable=False)  # True if branch matched watch_branch
+
+    repository = relationship("Repository", back_populates="webhook_deliveries")

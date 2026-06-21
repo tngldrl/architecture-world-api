@@ -60,10 +60,21 @@ app.add_middleware(
 MCP_URL = os.environ.get("MCP_URL", "http://localhost:8001")
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
+class RepositoryInput(BaseModel):
+    url: str
+    webhook_enabled: bool = False
+    watch_branch: Optional[str] = None
+
 class AnalyzeRequest(BaseModel):
-    repo_urls: list[str]
+    repo_urls: Optional[list[str]] = None  # Legacy: plain list of URLs
+    repositories: Optional[list[RepositoryInput]] = None  # New: per-repo settings
     project_name: Optional[str] = None
     github_installation_id: Optional[str] = None  # From GitHub App callback
+
+class CheckAccessRequest(BaseModel):
+    url: str
+    installation_id: Optional[str] = None
+
 
 async def run_analysis_task(
     project_id: str,
@@ -217,9 +228,25 @@ async def start_analysis(
     db: Session = Depends(get_db),
     user: dict = Depends(verify_token)
 ):
-    urls = [u.strip() for u in req.repo_urls if u.strip()]
-    if not urls:
+    # Normalize input: support both legacy repo_urls and new repositories format
+    if req.repositories:
+        repo_inputs = req.repositories
+    elif req.repo_urls:
+        repo_inputs = [RepositoryInput(url=u.strip()) for u in req.repo_urls if u.strip()]
+    else:
         raise HTTPException(status_code=400, detail="No URLs provided")
+
+    repo_inputs = [r for r in repo_inputs if r.url.strip()]
+    if not repo_inputs:
+        raise HTTPException(status_code=400, detail="No URLs provided")
+
+    # Validate: webhook_enabled=True requires watch_branch
+    for r in repo_inputs:
+        if r.webhook_enabled and not r.watch_branch:
+            raise HTTPException(
+                status_code=400,
+                detail=f"watch_branch is required when webhook_enabled=true (url: {r.url})"
+            )
 
     project = models.Project(
         status="analyzing",
@@ -231,13 +258,17 @@ async def start_analysis(
     db.commit()
     db.refresh(project)
 
-    # Save original (unauthenticated) repository URLs to DB
-    for url in urls:
+    # Save repository settings to DB
+    urls = []
+    for r in repo_inputs:
         db_repo = models.Repository(
             project_id=project.id,
-            url=url,
+            url=r.url.strip(),
+            webhook_enabled=r.webhook_enabled,
+            watch_branch=r.watch_branch,
         )
         db.add(db_repo)
+        urls.append(r.url.strip())
     db.commit()
 
     background_tasks.add_task(
@@ -248,6 +279,49 @@ async def start_analysis(
     )
 
     return {"project_id": project.id, "status": project.status}
+
+
+@app.post("/api/projects/{project_id}/re-analyze")
+async def re_analyze_project(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token),
+):
+    """
+    Triggers re-analysis of an existing project. Called when the user clicks
+    the 'Update' button after a push notification is received.
+    Immediately resets has_update to False before starting analysis.
+    """
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == user["uid"],
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status == "analyzing":
+        raise HTTPException(status_code=409, detail="Project is already being analyzed")
+
+    # Reset has_update immediately (idempotent – another push can set it back to True)
+    project.status = "analyzing"
+    project.has_update = False
+    db.commit()
+
+    # Delete existing microservices and dependencies so re-analysis writes fresh data
+    db.query(models.Microservice).filter(models.Microservice.project_id == project_id).delete()
+    db.query(models.Dependency).filter(models.Dependency.project_id == project_id).delete()
+    db.commit()
+
+    urls = [r.url for r in project.repositories]
+    background_tasks.add_task(
+        run_analysis_task,
+        project.id,
+        urls,
+        project.github_installation_id,
+    )
+
+    return {"project_id": project.id, "status": "analyzing"}
 
 
 @app.get("/api/github-app/install-url")
@@ -288,6 +362,62 @@ async def save_github_app_installation(
 
     return {"status": "saved", "installation_id": installation_id}
 
+@app.post("/api/github-app/check-access")
+async def check_github_app_access(
+    body: CheckAccessRequest,
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token),
+):
+    """
+    Checks if any GitHub App installation associated with the user (or passed in the request)
+    has access to the target repository.
+    """
+    repo_url = body.url.strip()
+    if not repo_url:
+        raise HTTPException(status_code=400, detail="Repository URL is required")
+
+    try:
+        owner, repo = parse_github_repo_url(repo_url)
+    except ValueError:
+        return {"has_access": False}
+
+    # Gather user's unique installation IDs from past projects
+    user_projects = db.query(models.Project).filter(
+        models.Project.user_id == user["uid"],
+        models.Project.github_installation_id.isnot(None),
+    ).all()
+
+    installation_ids = list(set([p.github_installation_id for p in user_projects if p.github_installation_id]))
+
+    # Append request-provided installation_id if present (e.g. from redirect before project is saved)
+    if body.installation_id:
+        installation_ids.append(body.installation_id)
+        installation_ids = list(set(installation_ids))
+
+    if not installation_ids:
+        return {"has_access": False}
+
+    # Query GitHub API using each installation ID to see if any token has access to the repo
+    for inst_id in installation_ids:
+        try:
+            iat = get_installation_access_token(inst_id)
+            url = f"https://api.github.com/repos/{owner}/{repo}"
+            headers = {
+                "Authorization": f"Bearer {iat}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    return {"has_access": True}
+        except Exception as e:
+            logger.warning("Failed checking access for installation %s on %s/%s: %s", inst_id, owner, repo, e)
+            continue
+
+    return {"has_access": False}
+
+
 @app.get("/api/projects")
 def list_projects(
     db: Session = Depends(get_db),
@@ -302,6 +432,7 @@ def list_projects(
             "id": proj.id,
             "name": proj.name,
             "status": proj.status,
+            "has_update": proj.has_update,
             "created_at": proj.created_at.isoformat() if proj.created_at else None
         }
         for proj in projects
@@ -356,6 +487,7 @@ def get_project(
         "id": project.id,
         "name": project.name,
         "status": project.status,
+        "has_update": project.has_update,
         "repositories": repositories,
         "microservices": microservices,
         "dependencies": dependencies
@@ -716,10 +848,13 @@ async def github_app_webhook(
         # This webhook is logged for audit purposes
         return {"status": "acknowledged", "event": event_type, "action": action}
 
-    # --- Push event: trigger re-analysis ---
+    # --- Push event: branch filtering + has_update flag + delivery logging ---
     if event_type == "push":
         installation_id = str(payload.get("installation", {}).get("id", ""))
         repo_url = payload.get("repository", {}).get("clone_url", "")
+        ref = payload.get("ref", "")  # e.g. "refs/heads/main"
+        pushed_branch = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
+        commit_sha = payload.get("after", None)  # HEAD commit SHA after push
 
         if not repo_url:
             return {"status": "ignored", "reason": "no repository url"}
@@ -738,20 +873,82 @@ async def github_app_webhook(
         if installation_id and not target_project.github_installation_id:
             target_project.github_installation_id = installation_id
 
-        target_project.status = "analyzing"
-        db.commit()
-
-        urls = [r.url for r in target_project.repositories]
-        background_tasks.add_task(
-            run_analysis_task,
-            target_project.id,
-            urls,
-            target_project.github_installation_id,
+        # Branch filtering: only act if webhook is enabled and branch matches
+        matched = (
+            db_repo.webhook_enabled
+            and bool(db_repo.watch_branch)
+            and pushed_branch == db_repo.watch_branch
         )
 
-        return {"status": "re-analyzing", "project_id": target_project.id}
+        # Always record the delivery for audit/news-feed purposes
+        delivery = models.WebhookDelivery(
+            repository_id=db_repo.id,
+            project_id=target_project.id,
+            branch=pushed_branch or "unknown",
+            commit_sha=commit_sha,
+            matched=matched,
+        )
+        db.add(delivery)
+
+        if matched:
+            target_project.has_update = True
+            db.commit()
+            logger.info(
+                "push matched watch_branch '%s' for project %s – has_update set to True",
+                pushed_branch, target_project.id,
+            )
+            return {"status": "update_flagged", "project_id": target_project.id}
+        else:
+            db.commit()
+            reason = "webhook_disabled" if not db_repo.webhook_enabled else f"branch '{pushed_branch}' != watch_branch '{db_repo.watch_branch}'"
+            logger.info("push ignored for project %s: %s", target_project.id, reason)
+            return {"status": "ignored", "reason": reason}
 
     return {"status": "ignored", "event": event_type}
+
+
+@app.get("/api/webhook-deliveries")
+def list_webhook_deliveries(
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token),
+):
+    """
+    Returns the latest 20 matched push event deliveries for the logged-in user's projects.
+    Used by the dashboard news-feed component.
+    """
+    # Get all project IDs for this user
+    user_projects = db.query(models.Project.id).filter(
+        models.Project.user_id == user["uid"]
+    ).all()
+    project_ids = [p.id for p in user_projects]
+
+    if not project_ids:
+        return []
+
+    deliveries = (
+        db.query(models.WebhookDelivery)
+        .filter(
+            models.WebhookDelivery.project_id.in_(project_ids),
+            models.WebhookDelivery.matched == True,
+        )
+        .order_by(models.WebhookDelivery.received_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    result = []
+    for d in deliveries:
+        repo_url = d.repository.url if d.repository else None
+        result.append({
+            "id": d.id,
+            "repository_url": repo_url,
+            "project_id": d.project_id,
+            "branch": d.branch,
+            "commit_sha": d.commit_sha,
+            "received_at": d.received_at.isoformat() if d.received_at else None,
+        })
+    return result
+
 
 if __name__ == "__main__":
     import uvicorn
