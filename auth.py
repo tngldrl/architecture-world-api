@@ -39,15 +39,25 @@ def verify_token(authorization: str = Header(None), db: Session = Depends(get_db
         
     # Try to decode JWT payload offline
     payload = decode_token_payload(token)
+    github_id = None
     if payload and "sub" in payload:
         uid = payload["sub"]
         email = payload.get("email", f"{uid}@example.com")
         display_name = payload.get("name", "GitHub User")
+        
+        # Extract GitHub numeric ID from Firebase identities
+        firebase_ident = payload.get("firebase", {})
+        identities = firebase_ident.get("identities", {})
+        github_ids = identities.get("github.com", [])
+        if github_ids:
+            github_id = str(github_ids[0])
     else:
         # Fallback to mock behavior
         uid = token[:30]
         email = f"{uid}@example.com"
         display_name = "GitHub User"
+        if token == "admin-mock":
+            github_id = "67980315"
         
     # Check if user exists in DB
     user = db.query(models.User).filter(models.User.id == uid).first()
@@ -65,4 +75,4 @@ def verify_token(authorization: str = Header(None), db: Session = Depends(get_db
             db.commit()
             db.refresh(user)
         
-    return {"uid": user.id, "email": user.email, "is_anonymous": False}
+    return {"uid": user.id, "email": user.email, "is_anonymous": False, "github_id": github_id}

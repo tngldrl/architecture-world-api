@@ -9,3 +9,5 @@ alembic>=1.13.1
 PyJWT[crypto]>=2.8.0
 cryptography>=42.0.0
 python-dotenv
+google-cloud-secret-manager
+

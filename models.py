@@ -17,6 +17,7 @@ class Project(Base):
     status = Column(String, default="analyzing") # analyzing, ready, error
     github_installation_id = Column(String, nullable=True)  # GitHub App installation ID (non-sensitive)
     has_update = Column(Boolean, default=False, nullable=False)  # True when a tracked repo received a push
+    is_demo = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="projects")
@@ -94,6 +95,7 @@ class User(Base):
     id = Column(String, primary_key=True) # Firebase UID
     email = Column(String)
     display_name = Column(String)
+    github_username = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")

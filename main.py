@@ -39,6 +39,30 @@ MAX_FILES_PER_HOP = 3
 # Create tables
 Base.metadata.create_all(bind=engine)
 
+# Dynamic migrations
+from sqlalchemy import inspect, text
+try:
+    inspector = inspect(engine)
+    if "projects" in inspector.get_table_names():
+        columns = [col["name"] for col in inspector.get_columns("projects")]
+        if "is_demo" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE projects ADD COLUMN is_demo BOOLEAN DEFAULT FALSE"))
+                logger.info("Migrated projects table: added is_demo column")
+except Exception as e:
+    logger.error(f"Failed to migrate projects table: {e}")
+
+try:
+    inspector = inspect(engine)
+    if "users" in inspector.get_table_names():
+        columns = [col["name"] for col in inspector.get_columns("users")]
+        if "github_username" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN github_username VARCHAR"))
+                logger.info("Migrated users table: added github_username column")
+except Exception as e:
+    logger.error(f"Failed to migrate users table: {e}")
+
 app = FastAPI(title="Architecture World API")
 
 allowed_origins = [
@@ -87,6 +111,128 @@ def find_repository_by_url(db: Session, url: str, project_id: Optional[str] = No
     return repos[0] if repos else None
 
 
+# --- Admin Authentication & Session Management ---
+ADMIN_SESSION_SECRET = os.environ.get("ADMIN_SESSION_SECRET", "super-secret-admin-session-key")
+
+def get_secret(secret_name: str) -> Optional[str]:
+    # 1. Try env variable (e.g. ADMIN_GITHUB_ID, ADMIN_PASSWORD_HASH)
+    val = os.environ.get(secret_name.upper().replace("-", "_"))
+    if val:
+        return val
+        
+    # 2. Try Google Secret Manager
+    gcp_project = os.environ.get("GCP_PROJECT_ID")
+    if gcp_project:
+        try:
+            from google.cloud import secretmanager
+            client = secretmanager.SecretManagerServiceClient()
+            name = f"projects/{gcp_project}/secrets/{secret_name}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            return response.payload.data.decode("UTF-8").strip()
+        except Exception as e:
+            logger.warning(f"Failed to access secret {secret_name} from Secret Manager: {e}")
+            
+    return None
+
+def get_admin_credentials():
+    admin_github_id = get_secret("admin-github-id")
+    admin_password_hash = get_secret("admin-password-hash")
+    
+    # Defaults / mock fallbacks
+    if not admin_github_id:
+        admin_github_id = "67980315"  # Mock default
+    if not admin_password_hash:
+        # Default SHA-256 hash of "admin123" for local testing
+        admin_password_hash = "24075309b832e85a6396f9bfdbf92e8fa6506f3630f9a200e62058863f695576"
+        
+    return admin_github_id, admin_password_hash
+
+def generate_admin_session_token() -> str:
+    import jwt
+    import time
+    now = int(time.time())
+    payload = {
+        "sub": "admin",
+        "iat": now,
+        "exp": now + 1800, # 30 minutes validation
+    }
+    return jwt.encode(payload, ADMIN_SESSION_SECRET, algorithm="HS256")
+
+def verify_admin_session_token(token: str) -> bool:
+    import jwt
+    try:
+        payload = jwt.decode(token, ADMIN_SESSION_SECRET, algorithms=["HS256"])
+        return payload.get("sub") == "admin"
+    except Exception:
+        return False
+
+def sha256_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+class UserSyncRequest(BaseModel):
+    github_username: str
+
+class AdminVerifyRequest(BaseModel):
+    digest: str
+    timestamp: str
+
+@app.post("/api/users/sync")
+async def sync_user(
+    req: UserSyncRequest,
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
+    # Check if the user is in the database and update their github_username
+    db_user = db.query(models.User).filter(models.User.id == user["uid"]).first()
+    if db_user:
+        db_user.github_username = req.github_username
+        db.commit()
+        db.refresh(db_user)
+        
+    # Check if this user is the admin
+    admin_github_id, _ = get_admin_credentials()
+    
+    # Check if user's github_id matches the admin_github_id
+    is_admin = False
+    if user.get("github_id") and admin_github_id:
+        is_admin = (str(user["github_id"]) == str(admin_github_id))
+        
+    return {
+        "status": "success",
+        "is_admin": is_admin,
+        "github_username": req.github_username
+    }
+
+@app.post("/api/admin/verify")
+async def verify_admin(req: AdminVerifyRequest):
+    # Verify timestamp to prevent replay attacks (allow 5 mins skew)
+    try:
+        ts = int(req.timestamp)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid timestamp format")
+        
+    import time
+    now = int(time.time())
+    if abs(now - ts) > 300: # 5 minutes
+        raise HTTPException(status_code=401, detail="Request expired")
+        
+    _, admin_password_hash = get_admin_credentials()
+    
+    # Expected digest is SHA-256 of (admin_password_hash + timestamp)
+    expected_digest = sha256_hash(admin_password_hash + req.timestamp)
+    
+    if req.digest != expected_digest:
+        # Fallback to direct comparison of password_hash if they sent it as digest (just in case)
+        if req.digest == admin_password_hash:
+            logger.warning("Admin verified using direct hash instead of time-based digest")
+        else:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+            
+    # Success: Issue token
+    token = generate_admin_session_token()
+    return {"token": token, "expires_in": 1800}
+
+
 MCP_URL = os.environ.get("MCP_URL", "http://localhost:8001")
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
@@ -100,6 +246,7 @@ class AnalyzeRequest(BaseModel):
     repositories: Optional[list[RepositoryInput]] = None  # New: per-repo settings
     project_name: Optional[str] = None
     github_installation_id: Optional[str] = None  # From GitHub App callback
+    is_demo: bool = False
 
 class CheckAccessRequest(BaseModel):
     url: str
@@ -259,9 +406,15 @@ async def analysis_callback(project_id: str, payload: CallbackPayload, db: Sessi
 async def start_analysis(
     req: AnalyzeRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
     user: dict = Depends(verify_token)
 ):
+    if req.is_demo:
+        admin_token = request.headers.get("X-Admin-Session-Token")
+        if not admin_token or not verify_admin_session_token(admin_token):
+            raise HTTPException(status_code=403, detail="Admin session token is missing or invalid")
+
     # Normalize input: support both legacy repo_urls and new repositories format
     if req.repositories:
         repo_inputs = req.repositories
@@ -287,6 +440,7 @@ async def start_analysis(
         name=req.project_name,
         user_id=user["uid"],
         github_installation_id=req.github_installation_id,
+        is_demo=req.is_demo,
     )
     db.add(project)
     db.commit()
