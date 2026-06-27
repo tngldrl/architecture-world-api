@@ -503,6 +503,9 @@ async def start_analysis(
     db: Session = Depends(get_db),
     user: dict = Depends(verify_token)
 ):
+    if user.get("is_anonymous") or user.get("uid") == "guest":
+        raise HTTPException(status_code=403, detail="Guest users cannot create new projects. Please sign in.")
+
     if req.is_demo:
         admin_token = request.headers.get("X-Admin-Session-Token")
         if not admin_token or not verify_admin_session_token(admin_token):
@@ -562,6 +565,9 @@ async def re_analyze_project(
     db: Session = Depends(get_db),
     user: dict = Depends(verify_token),
 ):
+    if user.get("is_anonymous") or user.get("uid") == "guest":
+        raise HTTPException(status_code=403, detail="Guest users cannot re-analyze projects.")
+
     """
     Triggers re-analysis of an existing project. Called when the user clicks
     the 'Update' button after a push notification is received.
@@ -715,9 +721,15 @@ def list_projects(
     db: Session = Depends(get_db),
     user: dict = Depends(verify_token)
 ):
-    projects = db.query(models.Project).filter(
-        models.Project.user_id == user["uid"]
-    ).order_by(models.Project.created_at.desc()).all()
+    if user.get("is_anonymous") or user.get("uid") == "guest":
+        projects = db.query(models.Project).filter(
+            models.Project.is_demo == True,
+            models.Project.status == "ready"
+        ).order_by(models.Project.created_at.desc()).all()
+    else:
+        projects = db.query(models.Project).filter(
+            models.Project.user_id == user["uid"]
+        ).order_by(models.Project.created_at.desc()).all()
     
     return [
         {
