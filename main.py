@@ -30,7 +30,7 @@ GITHUB_APP_WEBHOOK_SECRET = os.environ.get("GITHUB_APP_WEBHOOK_SECRET", "")
 GITHUB_APP_INSTALL_URL = os.environ.get("GITHUB_APP_INSTALL_URL", "")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 VERTEX_AI_LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 # Max hops for agentic code retrieval during chat
 MAX_RETRIEVAL_HOPS = 3
@@ -727,8 +727,12 @@ def list_projects(
             models.Project.status == "ready"
         ).order_by(models.Project.created_at.desc()).all()
     else:
+        from sqlalchemy import or_, and_
         projects = db.query(models.Project).filter(
-            models.Project.user_id == user["uid"]
+            or_(
+                models.Project.user_id == user["uid"],
+                and_(models.Project.is_demo == True, models.Project.status == "ready")
+            )
         ).order_by(models.Project.created_at.desc()).all()
     
     return [
@@ -737,6 +741,7 @@ def list_projects(
             "name": proj.name,
             "status": proj.status,
             "has_update": proj.has_update,
+            "is_demo": proj.is_demo,
             "created_at": proj.created_at.isoformat() if proj.created_at else None
         }
         for proj in projects
